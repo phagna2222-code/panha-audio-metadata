@@ -8,6 +8,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from ..dialogs.file_info_dialog import FileInformationState
+from ..mastering import MasteringSettings
 from ..metadata import FfmpegNotFoundError, Metadata, MetadataWriteError, write_metadata
 
 
@@ -16,6 +17,7 @@ class BatchItem:
     source: str
     target: str
     metadata: Metadata
+    mastering: MasteringSettings = dataclasses.field(default_factory=MasteringSettings)
 
 
 class BatchWorker(QObject):
@@ -40,7 +42,12 @@ class BatchWorker(QObject):
             else:
                 try:
                     Path(item.target).parent.mkdir(parents=True, exist_ok=True)
-                    write_metadata(item.source, item.target, item.metadata)
+                    write_metadata(
+                        item.source,
+                        item.target,
+                        item.metadata,
+                        mastering=item.mastering,
+                    )
                     self.item_done.emit(idx, "Done")
                 except (
                     FfmpegNotFoundError,
@@ -60,6 +67,7 @@ def build_items(
     items: list[BatchItem] = []
     out_root = Path(output_dir).expanduser().resolve()
     base = dataclasses.replace(state.metadata)
+    mastering = dataclasses.replace(state.mastering)
     for src in sources:
         src_path = Path(src)
         stem = src_path.stem
@@ -74,7 +82,12 @@ def build_items(
         meta = dataclasses.replace(base)
         if not meta.title:
             meta.title = stem
-        items.append(BatchItem(source=str(src_path), target=str(target), metadata=meta))
+        items.append(BatchItem(
+            source=str(src_path),
+            target=str(target),
+            metadata=meta,
+            mastering=mastering,
+        ))
     return items
 
 

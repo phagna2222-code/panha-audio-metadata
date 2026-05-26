@@ -7,7 +7,6 @@ studio metadata, tracklist options and a template preset selector.
 from __future__ import annotations
 
 import dataclasses
-import json
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -34,7 +33,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..mastering import MasteringSettings
 from ..metadata import Metadata
+from ..templates import TemplateStore
 
 RATINGS = ["None", "1", "2", "3", "4", "5"]
 GENRES = [
@@ -56,6 +57,7 @@ class FileInformationState:
     enabled: bool = True
     metadata: Metadata = dataclasses.field(default_factory=Metadata)
     tracklist: TracklistOptions = dataclasses.field(default_factory=TracklistOptions)
+    mastering: MasteringSettings = dataclasses.field(default_factory=MasteringSettings)
     title: str = ""
     description: str = ""
 
@@ -64,6 +66,7 @@ class FileInformationState:
             "enabled": self.enabled,
             "metadata": dataclasses.asdict(self.metadata),
             "tracklist": dataclasses.asdict(self.tracklist),
+            "mastering": dataclasses.asdict(self.mastering),
             "title": self.title,
             "description": self.description,
         }
@@ -72,10 +75,12 @@ class FileInformationState:
     def from_dict(cls, data: dict) -> FileInformationState:
         meta = Metadata(**(data.get("metadata") or {}))
         tracklist = TracklistOptions(**(data.get("tracklist") or {}))
+        mastering = MasteringSettings(**(data.get("mastering") or {}))
         return cls(
             enabled=bool(data.get("enabled", True)),
             metadata=meta,
             tracklist=tracklist,
+            mastering=mastering,
             title=str(data.get("title", "")),
             description=str(data.get("description", "")),
         )
@@ -89,7 +94,7 @@ class FileInformationDialog(QDialog):
         self.setWindowTitle("File Information")
         self.setModal(True)
         self.setMinimumWidth(640)
-        self._templates_path = Path.home() / ".panha_templates.json"
+        self._templates = TemplateStore()
         self._state = state or FileInformationState()
         self._build_ui()
         self._load_state(self._state)
@@ -366,18 +371,11 @@ class FileInformationDialog(QDialog):
     # -- templates ------------------------------------------------------
 
     def _load_templates(self) -> dict[str, dict]:
-        if not self._templates_path.exists():
-            return {}
-        try:
-            return json.loads(self._templates_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        return self._templates.load()
 
     def _save_templates(self, templates: dict[str, dict]) -> None:
         try:
-            self._templates_path.write_text(
-                json.dumps(templates, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            self._templates.save(templates)
         except OSError as exc:
             QMessageBox.warning(self, "Templates", f"Failed to save templates: {exc}")
 
