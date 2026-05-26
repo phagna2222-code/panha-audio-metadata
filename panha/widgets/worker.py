@@ -37,18 +37,18 @@ class BatchWorker(QObject):
         for idx, item in enumerate(self._items):
             if self._cancel:
                 self.item_done.emit(idx, "Cancelled")
-                continue
-            try:
-                Path(item.target).parent.mkdir(parents=True, exist_ok=True)
-                write_metadata(item.source, item.target, item.metadata)
-                self.item_done.emit(idx, "Done")
-            except (
-                FfmpegNotFoundError,
-                MetadataWriteError,
-                OSError,
-                FileNotFoundError,
-            ) as exc:
-                self.item_failed.emit(idx, str(exc))
+            else:
+                try:
+                    Path(item.target).parent.mkdir(parents=True, exist_ok=True)
+                    write_metadata(item.source, item.target, item.metadata)
+                    self.item_done.emit(idx, "Done")
+                except (
+                    FfmpegNotFoundError,
+                    MetadataWriteError,
+                    OSError,
+                    FileNotFoundError,
+                ) as exc:
+                    self.item_failed.emit(idx, str(exc))
             self.progress.emit(idx + 1, total)
         self.finished.emit()
 

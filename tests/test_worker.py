@@ -71,8 +71,11 @@ def test_worker_cancels_remaining_items(qapp, tmp_path: Path):
     ]
     worker = BatchWorker(items)
     worker.cancel()
-    done, failed, _progress, finished = _drain_signals(worker)
+    done, failed, progress, finished = _drain_signals(worker)
 
     assert finished is True
     assert failed == []
     assert [s for _, s in done] == ["Cancelled", "Cancelled", "Cancelled"]
+    # Progress must still tick to total for cancelled items so the bar
+    # doesn't get stuck partway.
+    assert progress == [(1, 3), (2, 3), (3, 3)]
