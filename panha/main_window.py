@@ -1,4 +1,19 @@
-"""Main application window for Panha Audio Meta Data."""
+"""Main application window for Panha Audio Meta Data.
+
+Layout is modelled on the X-MIXM reference design:
+
+    [ header ]
+    [ Batch Queue table + progress ]
+    [ Setting Console: template row + 13-slider mastering grid ]
+    [ Waveform footer ]
+    [ Transport bar (prev/play/next/BYPASS + scrubber) ]
+    [ Status bar: license + footer + CPU/RAM ]
+
+Operational actions (Add Files / Add Folder / Output / Start / Stop /
+File Information / Export Settings) live behind the **Config** button in
+the Setting Console and the queue's right-click context menu, so the
+main surface stays focused on mixing.
+"""
 
 from __future__ import annotations
 
@@ -13,10 +28,12 @@ from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -32,16 +49,20 @@ from PyQt6.QtWidgets import (
 
 from . import __app_name__, __version__
 from .dialogs import (
+    ConfigDialog,
     ExportSettings,
     ExportSettingsDialog,
     FileInformationDialog,
 )
 from .dialogs.file_info_dialog import FileInformationState
+from .mastering import MasteringSettings
 from .metadata import format_duration, probe_duration_seconds
-from .widgets import WaveformView
+from .templates import TemplateStore
+from .widgets import MasteringPanel, SystemStatsWidget, TransportBar, WaveformView
 from .widgets.worker import BatchWorker, build_items, start_worker
 
 SUPPORTED_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
+_NEW_TEMPLATE_PLACEHOLDER = "Default"
 
 
 @dataclasses.dataclass
@@ -63,24 +84,29 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(__app_name__)
-        self.resize(1180, 760)
+        self.resize(1240, 820)
         self.setWindowIcon(self._make_icon())
 
         self._rows: list[QueueRow] = []
         self._info_state = FileInformationState()
-        self._export_settings = ExportSettings(format="MP3", sample_rate="44100 Hz", bit_depth="24-bit")
+        self._export_settings = ExportSettings(
+            format="MP3", sample_rate="44100 Hz", bit_depth="24-bit"
+        )
         self._output_dir: str = str(Path.home() / "PanhaExports")
         self._worker: BatchWorker | None = None
         self._thread: QThread | None = None
+        self._templates = TemplateStore()
+        self._current_template_name: str = ""
+        self._config_dialog: ConfigDialog | None = None
 
         self._build_ui()
+        self._refresh_template_combo()
         self._update_buttons()
 
     # -- icon -----------------------------------------------------------
 
     def _make_icon(self) -> QIcon:
-        # Use the small "musical-note like" emoji glyph rendered as fallback
-        # icon to avoid bundling a binary asset. Falls back to default icon.
+        # Render a "musical-note like" glyph so we don't ship a binary asset.
         pm = QPixmap(64, 64)
         pm.fill(QColor(0, 0, 0, 0))
         painter = QPainter(pm)
@@ -116,25 +142,41 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        # Header
+        root.addLayout(self._build_header())
+        root.addWidget(self._build_queue_section(), 1)
+        root.addWidget(self._build_setting_console())
+        root.addWidget(self._build_waveform_section())
+        root.addWidget(self._build_transport_section())
+
+        self._build_status_bar()
+
+    def _build_header(self) -> QHBoxLayout:
         header = QHBoxLayout()
         header.setSpacing(8)
         logo = QLabel("\u266B")
         logo.setStyleSheet("color:#5fa8ff;font-size:22px;font-weight:700;")
         title = QLabel(__app_name__)
-        title.setStyleSheet("color:#c8d2e0;font-size:16px;font-weight:600;letter-spacing:1px;")
+        title.setStyleSheet(
+            "color:#c8d2e0;font-size:16px;font-weight:600;letter-spacing:1px;"
+        )
         header.addWidget(logo)
         header.addWidget(title)
         header.addStretch(1)
-        root.addLayout(header)
+        return header
 
-        # Batch queue section
+    def _build_queue_section(self) -> QWidget:
         queue_frame, queue_layout = self._section_frame("Batch Queue")
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Filename", "Duration", "Type", "Status"])
+        self.table.setHorizontalHeaderLabels(
+            ["Filename", "Duration", "Type", "Status"]
+        )
         self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         header_view = self.table.horizontalHeader()
@@ -144,6 +186,7 @@ class MainWindow(QMainWindow):
         header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
+        self.table.currentCellChanged.connect(self._on_current_row_changed)
         queue_layout.addWidget(self.table, 1)
 
         self.progress = QProgressBar()
@@ -151,77 +194,87 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
         queue_layout.addWidget(self.progress)
-        root.addWidget(queue_frame, 1)
+        return queue_frame
 
-        # Toolbar
-        toolbar_frame, toolbar_layout = self._section_frame("Setting Console")
-        tools = QHBoxLayout()
-        tools.setSpacing(8)
-        self.btn_add_files = QPushButton("Add Files")
-        self.btn_add_folder = QPushButton("Add Folder")
-        self.btn_remove = QPushButton("Remove")
-        self.btn_clear = QPushButton("Clear all")
-        self.btn_info = QPushButton("File Information")
-        self.btn_info.setObjectName("accentButton")
-        self.btn_output = QPushButton("Output Folder")
-        self.btn_export = QPushButton("\u25B6 Start Export")
-        self.btn_export.setObjectName("primaryButton")
-        self.btn_stop = QPushButton("\u25A0 Stop")
-        self.btn_open_output = QPushButton("Open Output")
-        self.btn_export_settings = QPushButton("Export Settings")
+    def _build_setting_console(self) -> QWidget:
+        frame, layout = self._section_frame("Setting Console")
+
+        # Template row -------------------------------------------------
+        tpl_row = QHBoxLayout()
+        tpl_row.setSpacing(8)
+        tpl_row.addWidget(QLabel("Template:"))
+
+        self.cmb_template = QComboBox()
+        self.cmb_template.setEditable(False)
+        self.cmb_template.setObjectName("templateCombo")
+        self.cmb_template.currentIndexChanged.connect(self._on_template_changed)
+        tpl_row.addWidget(self.cmb_template, 1)
+
+        self.btn_save_as = QPushButton("Save As")
+        self.btn_save_as.clicked.connect(self._on_template_save_as)
+        self.btn_update = QPushButton("Update")
+        self.btn_update.clicked.connect(self._on_template_update)
+        self.btn_remove_template = QPushButton("Remove")
+        self.btn_remove_template.clicked.connect(self._on_template_remove)
+        self.btn_reset_all = QPushButton("Reset all")
+        self.btn_reset_all.clicked.connect(self._on_reset_all)
+        self.btn_config = QPushButton("Config")
+        self.btn_config.clicked.connect(self._on_open_config)
+        self.btn_analyze_ai = QPushButton("\u270D Analyze AI")
+        self.btn_analyze_ai.setObjectName("accentButton")
+        self.btn_analyze_ai.clicked.connect(self._on_analyze_ai)
+
         for btn in (
-            self.btn_add_files,
-            self.btn_add_folder,
-            self.btn_remove,
-            self.btn_clear,
-            self.btn_info,
-            self.btn_output,
-            self.btn_export_settings,
-            self.btn_export,
-            self.btn_stop,
-            self.btn_open_output,
+            self.btn_save_as,
+            self.btn_update,
+            self.btn_remove_template,
+            self.btn_reset_all,
+            self.btn_config,
+            self.btn_analyze_ai,
         ):
-            tools.addWidget(btn)
-        tools.addStretch(1)
-        toolbar_layout.addLayout(tools)
+            tpl_row.addWidget(btn)
 
-        info_row = QHBoxLayout()
-        info_row.setSpacing(12)
-        self.lbl_output = QLabel(f"Output: {self._output_dir}")
-        self.lbl_output.setObjectName("fieldLabel")
-        info_row.addWidget(self.lbl_output, 1)
-        toolbar_layout.addLayout(info_row)
+        layout.addLayout(tpl_row)
 
-        root.addWidget(toolbar_frame)
+        # Slider grid --------------------------------------------------
+        self.mastering_panel = MasteringPanel()
+        self.mastering_panel.changed.connect(self._on_mastering_changed)
+        layout.addWidget(self.mastering_panel)
 
-        # Waveform footer
+        return frame
+
+    def _build_waveform_section(self) -> QWidget:
         wave_frame = QFrame()
         wave_frame.setObjectName("sectionFrame")
         wave_layout = QVBoxLayout(wave_frame)
         wave_layout.setContentsMargins(14, 8, 14, 8)
         self.waveform = WaveformView()
         wave_layout.addWidget(self.waveform)
-        root.addWidget(wave_frame)
+        return wave_frame
 
-        # Status bar
+    def _build_transport_section(self) -> QWidget:
+        host = QFrame()
+        host.setObjectName("sectionFrame")
+        host_layout = QVBoxLayout(host)
+        host_layout.setContentsMargins(8, 4, 8, 4)
+        self.transport = TransportBar()
+        self.transport.prev_requested.connect(self._on_transport_prev)
+        self.transport.next_requested.connect(self._on_transport_next)
+        self.transport.bypass_changed.connect(self._on_transport_bypass)
+        host_layout.addWidget(self.transport)
+        return host
+
+    def _build_status_bar(self) -> None:
         status = QStatusBar()
         self.setStatusBar(status)
         self.status_active = QLabel("Status: Active")
         self.status_active.setObjectName("statusActive")
-        status.addPermanentWidget(QLabel(f"\u00A9 {self._year()} Panha \u2022 v{__version__}"))
-        status.addPermanentWidget(self.status_active)
-
-        # Connections
-        self.btn_add_files.clicked.connect(self._on_add_files)
-        self.btn_add_folder.clicked.connect(self._on_add_folder)
-        self.btn_remove.clicked.connect(self._on_remove_selected)
-        self.btn_clear.clicked.connect(self._on_clear)
-        self.btn_info.clicked.connect(self._on_open_info_dialog)
-        self.btn_output.clicked.connect(self._on_pick_output)
-        self.btn_export_settings.clicked.connect(self._on_open_export_dialog)
-        self.btn_export.clicked.connect(self._on_start_export)
-        self.btn_stop.clicked.connect(self._on_stop_export)
-        self.btn_open_output.clicked.connect(self._on_open_output)
+        status.addWidget(self.status_active)
+        status.addPermanentWidget(
+            QLabel(f"\u00A9 {self._year()} Panha \u2022 v{__version__}")
+        )
+        self.system_stats = SystemStatsWidget()
+        status.addPermanentWidget(self.system_stats)
 
     # -- helpers --------------------------------------------------------
 
@@ -231,21 +284,25 @@ class MainWindow(QMainWindow):
     def _update_buttons(self) -> None:
         running = self._worker is not None
         has_rows = bool(self._rows)
-        has_selection = bool(self.table.selectionModel() and self.table.selectionModel().hasSelection())
-        self.btn_export.setEnabled(has_rows and not running)
-        self.btn_stop.setEnabled(running)
-        self.btn_remove.setEnabled(has_rows and has_selection and not running)
-        self.btn_clear.setEnabled(has_rows and not running)
-        self.btn_add_files.setEnabled(not running)
-        self.btn_add_folder.setEnabled(not running)
-        self.btn_info.setEnabled(not running)
-        self.btn_output.setEnabled(not running)
-        self.btn_export_settings.setEnabled(not running)
+        has_template = self._current_template_name != ""
+        self.btn_update.setEnabled(has_template and not running)
+        self.btn_remove_template.setEnabled(has_template and not running)
+        self.btn_save_as.setEnabled(not running)
+        self.btn_reset_all.setEnabled(not running)
+        self.btn_config.setEnabled(True)
+        self.btn_analyze_ai.setEnabled(has_rows and not running)
+        if self._config_dialog is not None:
+            self._config_dialog.set_export_running(running)
 
     def _refresh_table(self) -> None:
         self.table.setRowCount(len(self._rows))
         for row_idx, row in enumerate(self._rows):
-            for col, value in enumerate((row.filename, format_duration(row.duration_seconds), row.file_type, row.status)):
+            for col, value in enumerate((
+                row.filename,
+                format_duration(row.duration_seconds),
+                row.file_type,
+                row.status,
+            )):
                 item = QTableWidgetItem(value)
                 if col == 3:
                     if row.status == "Done":
@@ -287,8 +344,146 @@ class MainWindow(QMainWindow):
             added += 1
         if added:
             self._refresh_table()
+            if self.table.currentRow() < 0 and self._rows:
+                self.table.setCurrentCell(0, 0)
 
-    # -- slots ----------------------------------------------------------
+    # -- template combo -------------------------------------------------
+
+    def _refresh_template_combo(self) -> None:
+        names = self._templates.names()
+        self.cmb_template.blockSignals(True)
+        self.cmb_template.clear()
+        self.cmb_template.addItem(_NEW_TEMPLATE_PLACEHOLDER)
+        for name in names:
+            self.cmb_template.addItem(name)
+        if self._current_template_name:
+            idx = self.cmb_template.findText(self._current_template_name)
+            self.cmb_template.setCurrentIndex(max(0, idx))
+        else:
+            self.cmb_template.setCurrentIndex(0)
+        self.cmb_template.blockSignals(False)
+        self._update_buttons()
+
+    def _apply_state(self, state: FileInformationState) -> None:
+        self._info_state = state
+        self.mastering_panel.blockSignals(True)
+        self.mastering_panel.set_settings(state.mastering)
+        self.mastering_panel.blockSignals(False)
+        self.transport.set_bypass(state.mastering.bypass)
+
+    # -- slots: template row -------------------------------------------
+
+    def _on_template_changed(self, index: int) -> None:
+        if index <= 0:
+            self._current_template_name = ""
+            self._update_buttons()
+            return
+        name = self.cmb_template.itemText(index)
+        payload = self._templates.get(name)
+        if payload is None:
+            return
+        self._apply_state(FileInformationState.from_dict(payload))
+        self._current_template_name = name
+        self._update_buttons()
+
+    def _on_template_save_as(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save Template", "Template name:")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        try:
+            self._templates.upsert(name, self._info_state.to_dict())
+        except OSError as exc:
+            QMessageBox.warning(self, "Templates", f"Failed to save: {exc}")
+            return
+        self._current_template_name = name
+        self._refresh_template_combo()
+
+    def _on_template_update(self) -> None:
+        if not self._current_template_name:
+            return
+        try:
+            self._templates.upsert(
+                self._current_template_name, self._info_state.to_dict()
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Templates", f"Failed to save: {exc}")
+            return
+        QMessageBox.information(
+            self, "Templates",
+            f"Template '{self._current_template_name}' updated.",
+        )
+
+    def _on_template_remove(self) -> None:
+        if not self._current_template_name:
+            return
+        reply = QMessageBox.question(
+            self, "Delete Template",
+            f"Delete template '{self._current_template_name}'?",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._templates.delete(self._current_template_name)
+        self._current_template_name = ""
+        self._refresh_template_combo()
+
+    def _on_reset_all(self) -> None:
+        self._apply_state(FileInformationState())
+        self._current_template_name = ""
+        self.cmb_template.setCurrentIndex(0)
+        self._update_buttons()
+
+    def _on_open_config(self) -> None:
+        if self._config_dialog is None:
+            dlg = ConfigDialog(self)
+            dlg.add_files_requested.connect(self._on_add_files)
+            dlg.add_folder_requested.connect(self._on_add_folder)
+            dlg.output_folder_requested.connect(self._on_pick_output)
+            dlg.file_information_requested.connect(self._on_open_info_dialog)
+            dlg.export_settings_requested.connect(self._on_open_export_dialog)
+            dlg.start_export_requested.connect(self._on_start_export)
+            dlg.stop_export_requested.connect(self._on_stop_export)
+            self._config_dialog = dlg
+        self._config_dialog.set_export_running(self._worker is not None)
+        self._config_dialog.show()
+        self._config_dialog.raise_()
+        self._config_dialog.activateWindow()
+
+    def _on_analyze_ai(self) -> None:
+        QMessageBox.information(
+            self, "Analyze AI",
+            "Automatic mastering suggestions aren't implemented yet.\n\n"
+            "Adjust the sliders manually or load a saved template.",
+        )
+
+    # -- slots: mastering / transport ----------------------------------
+
+    def _on_mastering_changed(self, settings: MasteringSettings) -> None:
+        self._info_state.mastering = settings
+
+    def _on_transport_bypass(self, bypass: bool) -> None:
+        self._info_state.mastering.bypass = bool(bypass)
+        self.mastering_panel.set_bypass(bypass)
+
+    def _on_transport_prev(self) -> None:
+        row = self.table.currentRow()
+        if row > 0:
+            self.table.setCurrentCell(row - 1, 0)
+
+    def _on_transport_next(self) -> None:
+        row = self.table.currentRow()
+        if 0 <= row < len(self._rows) - 1:
+            self.table.setCurrentCell(row + 1, 0)
+
+    def _on_current_row_changed(
+        self, row: int, _col: int, _prev_row: int, _prev_col: int
+    ) -> None:
+        if 0 <= row < len(self._rows):
+            self.transport.load_source(self._rows[row].path)
+        else:
+            self.transport.load_source(None)
+
+    # -- slots: batch actions ------------------------------------------
 
     def _on_add_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -301,7 +496,9 @@ class MainWindow(QMainWindow):
             self._add_paths(files)
 
     def _on_add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Add folder", str(Path.home()))
+        folder = QFileDialog.getExistingDirectory(
+            self, "Add folder", str(Path.home())
+        )
         if not folder:
             return
         candidates: list[str] = []
@@ -313,7 +510,9 @@ class MainWindow(QMainWindow):
         self._add_paths(candidates)
 
     def _on_remove_selected(self) -> None:
-        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
+        rows = sorted(
+            {idx.row() for idx in self.table.selectedIndexes()}, reverse=True
+        )
         for r in rows:
             if 0 <= r < len(self._rows):
                 del self._rows[r]
@@ -323,11 +522,17 @@ class MainWindow(QMainWindow):
         self._rows.clear()
         self._refresh_table()
         self.progress.setValue(0)
+        self.transport.load_source(None)
 
     def _on_open_info_dialog(self) -> None:
         dlg = FileInformationDialog(self._info_state, parent=self)
         if dlg.exec() == FileInformationDialog.DialogCode.Accepted:
-            self._info_state = dlg.collect_state()
+            new_state = dlg.collect_state()
+            # Preserve mastering — the File Information dialog doesn't
+            # expose it, so we keep whatever the slider panel currently
+            # holds rather than letting the dialog reset it to default.
+            new_state.mastering = self.mastering_panel.settings()
+            self._apply_state(new_state)
 
     def _on_open_export_dialog(self) -> None:
         dlg = ExportSettingsDialog(self._export_settings, parent=self)
@@ -336,16 +541,15 @@ class MainWindow(QMainWindow):
 
     def _on_pick_output(self) -> None:
         folder = QFileDialog.getExistingDirectory(
-            self, "Choose output folder", self._output_dir or str(Path.home())
+            self, "Choose output folder",
+            self._output_dir or str(Path.home()),
         )
         if folder:
             self._output_dir = folder
-            self.lbl_output.setText(f"Output: {self._output_dir}")
 
     def _on_open_output(self) -> None:
         out = Path(self._output_dir)
         out.mkdir(parents=True, exist_ok=True)
-        # Cross-platform best-effort open
         try:
             if sys.platform == "darwin":
                 subprocess.Popen(["open", str(out)])
@@ -358,7 +562,9 @@ class MainWindow(QMainWindow):
 
     def _on_start_export(self) -> None:
         if not self._rows:
-            QMessageBox.information(self, "Nothing to export", "Add some files first.")
+            QMessageBox.information(
+                self, "Nothing to export", "Add some files first."
+            )
             return
         if not self._info_state.enabled:
             reply = QMessageBox.question(
@@ -444,4 +650,6 @@ class MainWindow(QMainWindow):
         if self._thread:
             self._thread.quit()
             self._thread.wait(1500)
+        self.transport.stop()
+        self.system_stats.stop()
         super().closeEvent(event)

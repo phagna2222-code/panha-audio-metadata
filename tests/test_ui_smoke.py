@@ -16,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from panha.dialogs.config_dialog import ConfigDialog  # noqa: E402
 from panha.dialogs.export_settings_dialog import (  # noqa: E402
     ExportSettings,
     ExportSettingsDialog,
@@ -26,7 +27,13 @@ from panha.dialogs.file_info_dialog import (  # noqa: E402
     TracklistOptions,
 )
 from panha.main_window import MainWindow  # noqa: E402
+from panha.mastering import MasteringSettings  # noqa: E402
 from panha.metadata import Metadata  # noqa: E402
+from panha.widgets import (  # noqa: E402
+    MasteringPanel,
+    SystemStatsWidget,
+    TransportBar,
+)
 from panha.widgets.worker import build_items  # noqa: E402
 
 
@@ -38,9 +45,94 @@ def qapp():
 
 def test_main_window_constructs(qapp):
     win = MainWindow()
-    assert win.windowTitle() == "Panha Audio Meta Data"
-    assert win.table.columnCount() == 4
-    win.close()
+    try:
+        assert win.windowTitle() == "Panha Audio Meta Data"
+        assert win.table.columnCount() == 4
+        assert hasattr(win, "mastering_panel")
+        assert hasattr(win, "transport")
+        assert hasattr(win, "system_stats")
+        # The X-MIXM grid has exactly 13 slider columns.
+        assert len(win.mastering_panel._columns) == 13
+    finally:
+        win.system_stats.stop()
+        win.close()
+
+
+def test_mastering_panel_emits_changed(qapp):
+    panel = MasteringPanel()
+    captured: list[MasteringSettings] = []
+    panel.changed.connect(captured.append)
+    panel._columns["bass"].set_value(50)
+    panel._columns["gain"].set_value(20)
+    assert captured, "MasteringPanel.changed never fired"
+    final = captured[-1]
+    assert final.bass == 50
+    assert final.gain == 20
+    panel.deleteLater()
+
+
+def test_mastering_panel_set_settings_roundtrip(qapp):
+    panel = MasteringPanel()
+    panel.set_settings(MasteringSettings(bass=70, comp=30, gain=10))
+    out = panel.settings()
+    assert out.bass == 70
+    assert out.comp == 30
+    assert out.gain == 10
+    panel.deleteLater()
+
+
+def test_mastering_panel_bypass_dims_widget(qapp):
+    panel = MasteringPanel()
+    panel.set_bypass(True)
+    assert panel.isEnabled() is False
+    panel.set_bypass(False)
+    assert panel.isEnabled() is True
+    panel.deleteLater()
+
+
+def test_transport_bar_loads_source_and_clears(qapp, tmp_path: Path):
+    bar = TransportBar()
+    fake = tmp_path / "x.mp3"
+    fake.write_bytes(b"")
+    bar.load_source(fake)
+    bar.load_source(None)
+    assert bar.lbl_position.text() == "0:00"
+    bar.deleteLater()
+
+
+def test_transport_bar_emits_bypass_signal(qapp):
+    bar = TransportBar()
+    received: list[bool] = []
+    bar.bypass_changed.connect(received.append)
+    bar.btn_bypass.click()
+    bar.btn_bypass.click()
+    assert received == [True, False]
+    bar.deleteLater()
+
+
+def test_config_dialog_emits_action_signals(qapp):
+    dlg = ConfigDialog()
+    fired: list[str] = []
+    dlg.add_files_requested.connect(lambda: fired.append("add_files"))
+    dlg.start_export_requested.connect(lambda: fired.append("start"))
+    dlg.stop_export_requested.connect(lambda: fired.append("stop"))
+    dlg.btn_add_files.click()
+    dlg.btn_start.click()
+    dlg.btn_stop.click()
+    assert fired == ["add_files", "start", "stop"]
+    dlg.set_export_running(True)
+    assert dlg.btn_start.isEnabled() is False
+    assert dlg.btn_stop.isEnabled() is True
+    dlg.deleteLater()
+
+
+def test_system_stats_widget_reports_values(qapp):
+    widget = SystemStatsWidget(interval_ms=5000)
+    widget._refresh()
+    assert widget.cpu_text().startswith("CPU: ")
+    assert widget.ram_text().startswith("RAM: ")
+    widget.stop()
+    widget.deleteLater()
 
 
 def test_file_information_dialog_roundtrip(qapp, tmp_path: Path, monkeypatch):

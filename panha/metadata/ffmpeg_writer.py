@@ -3,6 +3,10 @@
 Uses ffmpeg via subprocess to write standard ID3v2 tags and embed cover art.
 Falls back to in-place rename atomically by writing to a temporary file
 next to the source and replacing it on success.
+
+When a non-default :class:`~panha.mastering.MasteringSettings` is supplied
+the audio is re-encoded with the corresponding filter chain instead of
+stream-copied; otherwise ``-c:a copy`` is preserved for zero-loss tagging.
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+from ..mastering import MasteringSettings, codec_args_for
 
 
 class FfmpegNotFoundError(RuntimeError):
@@ -162,6 +168,7 @@ def write_metadata(
     dst: str | os.PathLike[str],
     meta: Metadata,
     *,
+    mastering: MasteringSettings | None = None,
     ffmpeg: str | None = None,
     overwrite: bool = True,
 ) -> str:
@@ -169,8 +176,12 @@ def write_metadata(
 
     ``src`` and ``dst`` may point to the same file; the function writes
     through a temporary file and atomically replaces ``dst`` only on
-    success. Audio is stream-copied (``-codec copy``) so no re-encoding
-    happens unless cover art needs to be embedded.
+    success.
+
+    Audio is stream-copied (``-c:a copy``) when ``mastering`` is ``None``
+    or inactive, so tagging stays zero-loss. When the mastering chain is
+    active the audio stream is re-encoded with the appropriate codec for
+    the destination suffix and the filter chain is applied via ``-af``.
 
     Returns the absolute path to the written file.
     """
@@ -185,6 +196,8 @@ def write_metadata(
 
     cover_file = resolve_cover_path(meta.cover_path) if meta.cover_path else ""
     has_cover = bool(cover_file)
+    filter_chain = mastering.to_filter_chain() if mastering is not None else ""
+    re_encode = bool(filter_chain)
 
     cmd: list[str] = [
         ffmpeg_bin,
@@ -198,19 +211,25 @@ def write_metadata(
     ]
     if has_cover:
         cmd.extend(["-i", cover_file])
+        cmd.extend(["-map", "0:a", "-map", "1"])
+    else:
+        cmd.extend(["-map", "0:a"])
+
+    if re_encode:
+        cmd.extend(codec_args_for(dst_path.suffix))
+        cmd.extend(["-af", filter_chain])
+    else:
+        cmd.extend(["-c:a", "copy"])
+
+    if has_cover:
         cmd.extend([
-            "-map", "0:a",
-            "-map", "1",
-            "-c:a", "copy",
             "-c:v", "mjpeg",
-            "-id3v2_version", "3",
             "-disposition:v", "attached_pic",
             "-metadata:s:v", "title=Album cover",
             "-metadata:s:v", "comment=Cover (front)",
         ])
-    else:
-        cmd.extend(["-map", "0", "-c", "copy", "-id3v2_version", "3"])
 
+    cmd.extend(["-id3v2_version", "3"])
     cmd.extend(meta.to_ffmpeg_args())
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)
