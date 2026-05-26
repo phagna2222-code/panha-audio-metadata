@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -239,16 +240,12 @@ class FileInformationDialog(QDialog):
         self.chk_remove_tracknum.setChecked(True)
         tl_layout.addWidget(self.chk_uppercase)
         tl_layout.addWidget(self.chk_remove_tracknum)
-        tl_layout.addWidget(QLabel("Cover Size:"))
-        self.spn_cover_w = QSpinBox()
-        self.spn_cover_w.setRange(64, 8192)
-        self.spn_cover_w.setValue(1600)
-        self.spn_cover_h = QSpinBox()
-        self.spn_cover_h.setRange(64, 8192)
-        self.spn_cover_h.setValue(1600)
-        tl_layout.addWidget(self.spn_cover_w)
-        tl_layout.addWidget(QLabel("x"))
-        tl_layout.addWidget(self.spn_cover_h)
+        tl_layout.addWidget(QLabel("Cover Size (px):"))
+        self.spn_cover_size = QSpinBox()
+        self.spn_cover_size.setRange(64, 8192)
+        self.spn_cover_size.setValue(1600)
+        self.spn_cover_size.setSingleStep(64)
+        tl_layout.addWidget(self.spn_cover_size)
         tl_layout.addStretch(1)
         root.addWidget(tracklist_box)
 
@@ -289,8 +286,7 @@ class FileInformationDialog(QDialog):
         self.ed_comment.setText(meta.comment)
         self.chk_uppercase.setChecked(state.tracklist.uppercase)
         self.chk_remove_tracknum.setChecked(state.tracklist.remove_track_number)
-        self.spn_cover_w.setValue(state.tracklist.cover_size)
-        self.spn_cover_h.setValue(state.tracklist.cover_size)
+        self.spn_cover_size.setValue(state.tracklist.cover_size)
         self._refresh_cover_preview()
 
     def collect_state(self) -> FileInformationState:
@@ -315,7 +311,7 @@ class FileInformationDialog(QDialog):
         tracklist = TracklistOptions(
             uppercase=self.chk_uppercase.isChecked(),
             remove_track_number=self.chk_remove_tracknum.isChecked(),
-            cover_size=int(self.spn_cover_w.value()),
+            cover_size=int(self.spn_cover_size.value()),
         )
         return FileInformationState(
             enabled=self.chk_enable.isChecked(),
@@ -408,8 +404,6 @@ class FileInformationDialog(QDialog):
             self._load_state(FileInformationState.from_dict(templates[name]))
 
     def _on_save_template(self) -> None:
-        from PyQt6.QtWidgets import QInputDialog
-
         name, ok = QInputDialog.getText(self, "Save Template", "Template name:")
         if not ok or not name.strip():
             return
