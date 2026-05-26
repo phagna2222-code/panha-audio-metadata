@@ -163,7 +163,16 @@ def write_metadata(
 
     has_cover = bool(meta.cover_path) and Path(meta.cover_path).is_file()
 
-    cmd: list[str] = [ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error", "-i", str(src_path)]
+    cmd: list[str] = [
+        ffmpeg_bin,
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src_path),
+    ]
     if has_cover:
         cmd.extend(["-i", str(meta.cover_path)])
         cmd.extend([
@@ -191,7 +200,13 @@ def write_metadata(
     cmd.append(str(tmp_path))
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
         if proc.returncode != 0:
             raise MetadataWriteError(
                 f"ffmpeg failed (rc={proc.returncode}) for {src_path}: "

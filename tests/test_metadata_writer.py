@@ -111,3 +111,32 @@ def test_write_metadata_embeds_cover(
 def test_write_metadata_missing_source(tmp_path: Path, ffmpeg_required):
     with pytest.raises(FileNotFoundError):
         write_metadata(tmp_path / "does-not-exist.mp3", tmp_path / "out.mp3", Metadata())
+
+
+def test_write_metadata_does_not_inherit_stdin(
+    sample_mp3: Path, sample_cover: Path, tmp_path: Path, monkeypatch
+):
+    """ffmpeg must run with stdin=DEVNULL so a backgrounded app does not
+    get its ffmpeg children frozen by SIGTTIN when they try to read the
+    inherited terminal."""
+    captured: dict[str, object] = {}
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["stdin"] = kwargs.get("stdin")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    from panha.metadata import ffmpeg_writer
+
+    monkeypatch.setattr(ffmpeg_writer.subprocess, "run", fake_run)
+
+    out = tmp_path / "out.mp3"
+    write_metadata(
+        sample_mp3, out, Metadata(title="x", cover_path=str(sample_cover))
+    )
+
+    assert captured["stdin"] == subprocess.DEVNULL
+    assert "-nostdin" in captured["cmd"]
