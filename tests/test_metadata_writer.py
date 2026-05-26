@@ -12,6 +12,7 @@ from panha.metadata import (
     format_duration,
     probe_duration_seconds,
     read_metadata,
+    resolve_cover_path,
     write_metadata,
 )
 
@@ -31,6 +32,16 @@ def test_metadata_to_ffmpeg_args_skips_empty_fields():
     assert "comment=ok" in args
     assert "date=" not in args
     assert all("year" not in a for a in args)
+
+
+def test_metadata_software_uses_standard_ffmpeg_keys_only():
+    """Regression: ``TSSE`` is a raw ID3 frame name, not a valid ffmpeg
+    -metadata key, and it must not leak into the command line.
+    """
+    args = Metadata(software="PanhaApp v1").to_ffmpeg_args()
+    assert "encoder=PanhaApp v1" in args
+    assert "encoded_by=PanhaApp v1" in args
+    assert not any(a.startswith("TSSE=") for a in args)
 
 
 def test_format_duration():
@@ -111,6 +122,61 @@ def test_write_metadata_embeds_cover(
 def test_write_metadata_missing_source(tmp_path: Path, ffmpeg_required):
     with pytest.raises(FileNotFoundError):
         write_metadata(tmp_path / "does-not-exist.mp3", tmp_path / "out.mp3", Metadata())
+
+
+def test_resolve_cover_path_passthrough_for_file(sample_cover: Path):
+    assert resolve_cover_path(str(sample_cover)) == str(sample_cover)
+
+
+def test_resolve_cover_path_picks_first_image_in_folder(
+    tmp_path: Path, sample_cover: Path
+):
+    # Drop the cover (and a decoy non-image) into a folder; resolution
+    # must skip the .txt and return the .jpg.
+    folder = tmp_path / "art"
+    folder.mkdir()
+    (folder / "readme.txt").write_text("not an image")
+    target = folder / "cover.jpg"
+    target.write_bytes(sample_cover.read_bytes())
+    assert resolve_cover_path(str(folder)) == str(target)
+
+
+def test_resolve_cover_path_empty_inputs(tmp_path: Path):
+    assert resolve_cover_path("") == ""
+    assert resolve_cover_path(str(tmp_path / "nope")) == ""
+    empty = tmp_path / "empty_dir"
+    empty.mkdir()
+    assert resolve_cover_path(str(empty)) == ""
+
+
+def test_write_metadata_embeds_cover_when_cover_path_is_a_folder(
+    sample_mp3: Path, sample_cover: Path, tmp_path: Path
+):
+    """Regression: the dialog's 'Folder' button populates ``cover_path``
+    with a directory; the writer must resolve that to the first image
+    inside instead of silently dropping the cover.
+    """
+    import json
+
+    folder = tmp_path / "covers"
+    folder.mkdir()
+    (folder / "art.jpg").write_bytes(sample_cover.read_bytes())
+
+    out = tmp_path / "with-folder-cover.mp3"
+    write_metadata(
+        sample_mp3, out, Metadata(title="folder cover", cover_path=str(folder))
+    )
+
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(proc.stdout)
+    assert any(
+        s.get("codec_type") == "video"
+        and s.get("disposition", {}).get("attached_pic") == 1
+        for s in data["streams"]
+    ), "cover should be embedded when cover_path is a directory"
 
 
 def test_write_metadata_does_not_inherit_stdin(

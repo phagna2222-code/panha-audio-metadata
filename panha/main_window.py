@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -78,8 +81,6 @@ class MainWindow(QMainWindow):
     def _make_icon(self) -> QIcon:
         # Use the small "musical-note like" emoji glyph rendered as fallback
         # icon to avoid bundling a binary asset. Falls back to default icon.
-        from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
-
         pm = QPixmap(64, 64)
         pm.fill(QColor(0, 0, 0, 0))
         painter = QPainter(pm)
@@ -225,8 +226,6 @@ class MainWindow(QMainWindow):
     # -- helpers --------------------------------------------------------
 
     def _year(self) -> int:
-        from datetime import datetime
-
         return datetime.now().year
 
     def _update_buttons(self) -> None:
@@ -347,9 +346,6 @@ class MainWindow(QMainWindow):
         out = Path(self._output_dir)
         out.mkdir(parents=True, exist_ok=True)
         # Cross-platform best-effort open
-        import subprocess
-        import sys
-
         try:
             if sys.platform == "darwin":
                 subprocess.Popen(["open", str(out)])

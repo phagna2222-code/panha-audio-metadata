@@ -69,7 +69,6 @@ class Metadata:
             "copyright": self.copyright,
             "encoder": self.software,
             "encoded_by": self.software,
-            "TSSE": self.software,
             "source": self.source,
         }
         args: list[str] = []
@@ -99,6 +98,29 @@ def _resolve_ffprobe(binary: str | None = None) -> str:
             "Install ffmpeg or set PANHA_FFPROBE."
         )
     return path
+
+
+COVER_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def resolve_cover_path(cover_path: str | os.PathLike[str]) -> str:
+    """Return a usable image file path for ``cover_path``.
+
+    If ``cover_path`` points directly at a file it is returned unchanged.
+    If it points at a directory, the first image (alphabetical, by
+    :data:`COVER_IMAGE_SUFFIXES`) inside that directory is returned. The
+    empty string is returned when no usable image can be located.
+    """
+    if not cover_path:
+        return ""
+    p = Path(cover_path)
+    if p.is_file():
+        return str(p)
+    if p.is_dir():
+        for child in sorted(p.iterdir()):
+            if child.is_file() and child.suffix.lower() in COVER_IMAGE_SUFFIXES:
+                return str(child)
+    return ""
 
 
 def probe_duration_seconds(path: str | os.PathLike[str], *, ffprobe: str | None = None) -> float:
@@ -161,7 +183,8 @@ def write_metadata(
 
     ffmpeg_bin = _resolve_ffmpeg(ffmpeg)
 
-    has_cover = bool(meta.cover_path) and Path(meta.cover_path).is_file()
+    cover_file = resolve_cover_path(meta.cover_path) if meta.cover_path else ""
+    has_cover = bool(cover_file)
 
     cmd: list[str] = [
         ffmpeg_bin,
@@ -174,7 +197,7 @@ def write_metadata(
         str(src_path),
     ]
     if has_cover:
-        cmd.extend(["-i", str(meta.cover_path)])
+        cmd.extend(["-i", cover_file])
         cmd.extend([
             "-map", "0:a",
             "-map", "1",
