@@ -16,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt6")
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
+from panha.dialogs.ai_detector_dialog import AIDetectorDialog  # noqa: E402
 from panha.dialogs.config_dialog import ConfigDialog  # noqa: E402
 from panha.dialogs.export_settings_dialog import (  # noqa: E402
     ExportSettings,
@@ -123,6 +124,38 @@ def test_config_dialog_emits_action_signals(qapp):
     dlg.set_export_running(True)
     assert dlg.btn_start.isEnabled() is False
     assert dlg.btn_stop.isEnabled() is True
+    dlg.deleteLater()
+
+
+def test_ai_detector_dialog_lists_added_files(qapp, tmp_path: Path):
+    dlg = AIDetectorDialog()
+    a = tmp_path / "a.mp3"
+    b = tmp_path / "b.mp3"
+    c = tmp_path / "c.txt"
+    for p in (a, b, c):
+        p.write_bytes(b"")
+
+    added = dlg.add_paths([str(a), str(b), str(c)])
+    assert added == 2, "non-audio files must be skipped"
+    assert dlg.table.rowCount() == 2
+    assert dlg.table.item(0, 0).text() == "a.mp3"
+    # Analysis columns start as placeholder em-dashes with a tooltip.
+    placeholder = dlg.table.item(0, 1)
+    assert placeholder.text() == "\u2014"
+    assert "not implemented" in placeholder.toolTip().lower()
+
+    # Re-adding the same file is idempotent.
+    assert dlg.add_paths([str(a)]) == 0
+    assert dlg.table.rowCount() == 2
+
+    # Backend hook lets a future analyser fill in real values.
+    dlg.set_row_result(0, platform="Suno", confidence="92%", verdict="AI")
+    assert dlg.table.item(0, 1).text() == "Suno"
+    assert dlg.table.item(0, 2).text() == "92%"
+    assert dlg.table.item(0, 3).text() == "AI"
+
+    dlg._on_clear()
+    assert dlg.table.rowCount() == 0
     dlg.deleteLater()
 
 
