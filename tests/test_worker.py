@@ -122,3 +122,34 @@ def test_schedule_probe_reports_zero_when_probe_raises(qapp, tmp_path: Path):
     qapp.processEvents()
 
     assert received == [(path, 0.0)]
+
+
+def test_worker_emits_cancelled_when_write_metadata_raises_cancelled(
+    qapp, monkeypatch, tmp_path: Path
+):
+    """When write_metadata raises MetadataWriteCancelledError mid-batch, the
+    worker must surface it as a 'Cancelled' done event (not 'Error: ...').
+    """
+    from panha.metadata import MetadataWriteCancelledError
+
+    src = tmp_path / "in.mp3"
+    src.write_bytes(b"not really an mp3")
+
+    def boom(*_args, **kwargs):
+        # Sanity check: BatchWorker must pass cancel_check through.
+        assert "cancel_check" in kwargs
+        raise MetadataWriteCancelledError("cancelled mid-export")
+
+    monkeypatch.setattr("panha.widgets.worker.write_metadata", boom)
+
+    item = BatchItem(
+        source=str(src), target=str(tmp_path / "out.mp3"),
+        metadata=Metadata(title="x"),
+    )
+    worker = BatchWorker([item])
+    done, failed, progress, finished = _drain_signals(worker)
+
+    assert finished is True
+    assert failed == []
+    assert done == [(0, "Cancelled")]
+    assert progress == [(1, 1)]
