@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from ..mastering import MasteringSettings, codec_args_for
@@ -28,6 +29,14 @@ class FfmpegNotFoundError(RuntimeError):
 
 class MetadataWriteError(RuntimeError):
     pass
+
+
+class MetadataWriteCancelledError(RuntimeError):
+    """Raised when ``cancel_check`` returns True mid-export.
+
+    Distinct from :class:`MetadataWriteError` so callers (notably the
+    batch worker) can report "Cancelled" rather than "Error: ...".
+    """
 
 
 @dataclasses.dataclass
@@ -171,6 +180,9 @@ def write_metadata(
     mastering: MasteringSettings | None = None,
     ffmpeg: str | None = None,
     overwrite: bool = True,
+    cancel_check: Callable[[], bool] | None = None,
+    poll_interval: float = 0.1,
+    terminate_grace: float = 2.0,
 ) -> str:
     """Write ``meta`` to ``src`` and save the result at ``dst``.
 
@@ -242,18 +254,13 @@ def write_metadata(
     cmd.append(str(tmp_path))
 
     try:
-        proc = subprocess.run(
+        _run_ffmpeg(
             cmd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=120,
+            src_path=src_path,
+            cancel_check=cancel_check,
+            poll_interval=poll_interval,
+            terminate_grace=terminate_grace,
         )
-        if proc.returncode != 0:
-            raise MetadataWriteError(
-                f"ffmpeg failed (rc={proc.returncode}) for {src_path}: "
-                f"{proc.stderr.strip() or proc.stdout.strip()}"
-            )
         os.replace(tmp_path, dst_path)
     finally:
         if tmp_path.exists():
@@ -263,6 +270,72 @@ def write_metadata(
                 pass
 
     return str(dst_path)
+
+
+def _run_ffmpeg(
+    cmd: list[str],
+    *,
+    src_path: Path,
+    cancel_check: Callable[[], bool] | None,
+    poll_interval: float,
+    terminate_grace: float,
+) -> None:
+    """Run ffmpeg in a subprocess, supporting cooperative cancellation.
+
+    Uses :class:`subprocess.Popen` (not ``subprocess.run``) so the parent
+    can ``terminate()`` the ffmpeg child when ``cancel_check`` returns
+    True. ``stdin`` is set to ``DEVNULL`` so a backgrounded app does not
+    get its ffmpeg children frozen by SIGTTIN when they try to read the
+    inherited terminal.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=poll_interval)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel_check is not None and cancel_check():
+                    _terminate_ffmpeg(proc, grace=terminate_grace)
+                    raise MetadataWriteCancelledError(
+                        f"export cancelled for {src_path}"
+                    ) from None
+    except BaseException:
+        # Make sure the child is reaped even on Ctrl-C / unexpected errors.
+        if proc.poll() is None:
+            _terminate_ffmpeg(proc, grace=terminate_grace)
+        raise
+
+    if proc.returncode != 0:
+        raise MetadataWriteError(
+            f"ffmpeg failed (rc={proc.returncode}) for {src_path}: "
+            f"{(stderr or '').strip() or (stdout or '').strip()}"
+        )
+
+
+def _terminate_ffmpeg(proc: subprocess.Popen, *, grace: float) -> None:
+    """Best-effort terminate -> kill of an ffmpeg child."""
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            return
+        try:
+            proc.communicate(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def read_metadata(

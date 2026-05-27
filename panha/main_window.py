@@ -664,9 +664,16 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._worker:
             self._worker.cancel()
-        if self._thread:
+        # write_metadata polls cancel_check every 100ms and grants the
+        # ffmpeg child up to 2s to exit gracefully (then kill -9), so
+        # 6s is a comfortable upper bound for a clean shutdown. We fall
+        # back to QThread.terminate() if the worker is wedged so the app
+        # doesn't hang on close.
+        if self._thread is not None and self._thread.isRunning():
             self._thread.quit()
-            self._thread.wait(1500)
+            if not self._thread.wait(6000):
+                self._thread.terminate()
+                self._thread.wait(1000)
         self.transport.stop()
         self.system_stats.stop()
         if self._ai_dialog is not None:

@@ -13,6 +13,7 @@ from ..mastering import MasteringSettings
 from ..metadata import (
     FfmpegNotFoundError,
     Metadata,
+    MetadataWriteCancelledError,
     MetadataWriteError,
     probe_duration_seconds,
     write_metadata,
@@ -54,8 +55,13 @@ class BatchWorker(QObject):
                         item.target,
                         item.metadata,
                         mastering=item.mastering,
+                        cancel_check=lambda: self._cancel,
                     )
                     self.item_done.emit(idx, "Done")
+                except MetadataWriteCancelledError:
+                    # Cancellation arrived mid-ffmpeg; the child was
+                    # already terminated by write_metadata.
+                    self.item_done.emit(idx, "Cancelled")
                 except (
                     FfmpegNotFoundError,
                     MetadataWriteError,

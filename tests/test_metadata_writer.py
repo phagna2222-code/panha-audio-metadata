@@ -186,18 +186,16 @@ def test_write_metadata_does_not_inherit_stdin(
     get its ffmpeg children frozen by SIGTTIN when they try to read the
     inherited terminal."""
     captured: dict[str, object] = {}
-    real_run = subprocess.run
+    real_popen = subprocess.Popen
 
-    def fake_run(cmd, *args, **kwargs):
+    def fake_popen(cmd, *args, **kwargs):
         captured["cmd"] = list(cmd)
         captured["stdin"] = kwargs.get("stdin")
-        return real_run(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        return real_popen(cmd, *args, **kwargs)
 
     from panha.metadata import ffmpeg_writer
 
-    monkeypatch.setattr(ffmpeg_writer.subprocess, "run", fake_run)
+    monkeypatch.setattr(ffmpeg_writer.subprocess, "Popen", fake_popen)
 
     out = tmp_path / "out.mp3"
     write_metadata(
@@ -206,3 +204,71 @@ def test_write_metadata_does_not_inherit_stdin(
 
     assert captured["stdin"] == subprocess.DEVNULL
     assert "-nostdin" in captured["cmd"]
+
+
+def test_write_metadata_terminates_ffmpeg_on_cancel(
+    sample_mp3: Path, tmp_path: Path, monkeypatch
+):
+    """When cancel_check flips to True mid-export, write_metadata must
+    terminate the ffmpeg child and raise MetadataWriteCancelledError rather
+    than blocking until ffmpeg finishes on its own.
+    """
+    from panha.metadata import MetadataWriteCancelledError, ffmpeg_writer
+
+    real_popen = subprocess.Popen
+    started: list[subprocess.Popen] = []
+
+    def slow_popen(cmd, *args, **kwargs):
+        # Replace the real ffmpeg command with a long-running sleep so we
+        # can race the cancel against it deterministically.
+        proc = real_popen(
+            ["sh", "-c", "sleep 30"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(ffmpeg_writer.subprocess, "Popen", slow_popen)
+
+    cancelled = {"value": False}
+    poll_count = {"n": 0}
+
+    def cancel_check() -> bool:
+        # Trip cancel after the first poll (≈100ms in) so we know the
+        # child actually started.
+        poll_count["n"] += 1
+        if poll_count["n"] >= 1:
+            cancelled["value"] = True
+        return cancelled["value"]
+
+    out = tmp_path / "out.mp3"
+    with pytest.raises(MetadataWriteCancelledError):
+        write_metadata(
+            sample_mp3, out, Metadata(title="cancel-me"),
+            cancel_check=cancel_check,
+            poll_interval=0.05,
+            terminate_grace=2.0,
+        )
+
+    # The slow_popen child must be terminated (returncode set) and the
+    # destination file must NOT exist because we never reached os.replace.
+    assert started, "ffmpeg child was not started"
+    assert started[0].poll() is not None, "ffmpeg child was never terminated"
+    assert not out.exists(), "destination should not exist on cancel"
+
+
+def test_write_metadata_cancel_check_unused_when_never_true(
+    sample_mp3: Path, tmp_path: Path
+):
+    """Passing a cancel_check that always returns False must not change
+    the normal success path."""
+    out = tmp_path / "ok.mp3"
+    write_metadata(
+        sample_mp3, out, Metadata(title="ok"),
+        cancel_check=lambda: False,
+        poll_interval=0.05,
+    )
+    assert out.exists()
