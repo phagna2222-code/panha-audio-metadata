@@ -609,6 +609,13 @@ class MainWindow(QMainWindow):
         worker.item_done.connect(self._on_item_done)
         worker.item_failed.connect(self._on_item_failed)
         worker.finished.connect(self._on_worker_finished)
+        # Clear the thread reference only after the QThread has actually
+        # finished. If we cleared on worker.finished (which is emitted from
+        # inside the worker thread's run()), Python could garbage-collect
+        # the QThread wrapper while the underlying C++ thread is still
+        # winding down, crashing with "QThread: Destroyed while thread is
+        # still running".
+        thread.finished.connect(self._on_thread_finished)
         self._worker = worker
         self._thread = thread
         self.waveform.setActive(True)
@@ -629,10 +636,14 @@ class MainWindow(QMainWindow):
         self._update_row_status(idx, f"Error: {message[:60]}")
 
     def _on_worker_finished(self) -> None:
-        self._worker = None
-        self._thread = None
+        # Worker has finished its loop but the QThread may still be quitting.
+        # Only update UI here; references are cleared in _on_thread_finished.
         self.waveform.setActive(False)
         self.progress.setValue(100)
+
+    def _on_thread_finished(self) -> None:
+        self._worker = None
+        self._thread = None
         self._update_buttons()
 
     # -- context menu --------------------------------------------------
