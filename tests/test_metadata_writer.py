@@ -272,3 +272,126 @@ def test_write_metadata_cancel_check_unused_when_never_true(
         poll_interval=0.05,
     )
     assert out.exists()
+
+
+def test_write_metadata_sample_rate_override(
+    sample_mp3: Path, tmp_path: Path
+):
+    """sample_rate_hz must add `-ar <hz>` and force a re-encode."""
+    out = tmp_path / "ar.mp3"
+    write_metadata(
+        sample_mp3, out, Metadata(title="ar"), sample_rate_hz=22050
+    )
+    # ffprobe the resulting file and confirm sample rate matches.
+    import json
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-select_streams", "a",
+         "-of", "json", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    streams = json.loads(proc.stdout)["streams"]
+    assert streams, "no audio stream in output"
+    assert int(streams[0]["sample_rate"]) == 22050
+
+
+def test_write_metadata_lufs_target_adds_loudnorm(
+    sample_mp3: Path, tmp_path: Path, monkeypatch
+):
+    """lufs_target_lufs must inject a loudnorm filter and re-encode."""
+    captured: dict[str, object] = {}
+    real_popen = subprocess.Popen
+
+    def capturing_popen(cmd, *args, **kwargs):
+        captured.setdefault("cmd", list(cmd))
+        return real_popen(cmd, *args, **kwargs)
+
+    from panha.metadata import ffmpeg_writer
+    monkeypatch.setattr(ffmpeg_writer.subprocess, "Popen", capturing_popen)
+
+    out = tmp_path / "loud.mp3"
+    write_metadata(
+        sample_mp3, out, Metadata(title="loud"), lufs_target_lufs=-14.0
+    )
+
+    cmd = captured["cmd"]
+    assert "-af" in cmd
+    af = cmd[cmd.index("-af") + 1]
+    assert "loudnorm=I=-14.0" in af
+    # And the codec must NOT be the stream-copy shortcut.
+    assert "copy" not in cmd[cmd.index("-af"):]
+
+
+def test_write_metadata_codec_args_override(
+    sample_mp3: Path, tmp_path: Path
+):
+    """codec_args_override replaces the format-default codec args
+    entirely (used by WAV bit-depth selection)."""
+    out = tmp_path / "out.wav"
+    write_metadata(
+        sample_mp3, out, Metadata(title="wavout"),
+        codec_args_override=["-c:a", "pcm_s16le"],
+    )
+    import json
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-select_streams", "a",
+         "-of", "json", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    streams = json.loads(proc.stdout)["streams"]
+    assert streams[0]["codec_name"] == "pcm_s16le"
+
+
+def test_write_metadata_force_re_encode_alone(
+    sample_mp3: Path, tmp_path: Path, monkeypatch
+):
+    """force_re_encode=True must drop the `-c:a copy` shortcut even
+    when no filter chain / codec override / sample-rate is supplied."""
+    captured: dict[str, object] = {}
+    real_popen = subprocess.Popen
+
+    def capturing_popen(cmd, *args, **kwargs):
+        captured.setdefault("cmd", list(cmd))
+        return real_popen(cmd, *args, **kwargs)
+
+    from panha.metadata import ffmpeg_writer
+    monkeypatch.setattr(ffmpeg_writer.subprocess, "Popen", capturing_popen)
+
+    out = tmp_path / "fre.mp3"
+    write_metadata(
+        sample_mp3, out, Metadata(title="fre"), force_re_encode=True
+    )
+
+    cmd = captured["cmd"]
+    # When re-encoding via the default codec args for .mp3, libmp3lame
+    # is used. The `copy` literal must not appear.
+    assert "-c:a" in cmd
+    assert "libmp3lame" in cmd
+    assert "copy" not in cmd
+
+
+def test_export_settings_helpers_translate_dialog_strings():
+    """ExportSettings parser methods are the single source of truth that
+    UI strings map to writer-friendly values."""
+    from panha.dialogs.export_settings_dialog import ExportSettings
+
+    es = ExportSettings(
+        format="WAV", sample_rate="48000 Hz", bit_depth="24-bit",
+        lufs_target="-14 LUFS",
+    )
+    assert es.output_suffix_for(".mp3") == ".wav"
+    assert es.parsed_sample_rate_hz() == 48000
+    assert es.parsed_lufs_target() == -14.0
+    assert es.codec_args_override() == ["-c:a", "pcm_s24le"]
+
+    # Default state: everything is a no-op (preserve source, no LUFS).
+    default = ExportSettings()
+    assert default.output_suffix_for(".flac") == ".flac"
+    assert default.output_suffix_for("") == ".mp3"
+    assert default.parsed_sample_rate_hz() is None
+    assert default.parsed_lufs_target() is None
+    assert default.codec_args_override() is None
+
+    # MP3-as-target: no bit-depth codec override (bit depth is WAV-only).
+    mp3 = ExportSettings(format="MP3", bit_depth="32-bit")
+    assert mp3.output_suffix_for(".wav") == ".mp3"
+    assert mp3.codec_args_override() is None

@@ -90,10 +90,9 @@ class MainWindow(QMainWindow):
 
         self._rows: list[QueueRow] = []
         self._info_state = FileInformationState()
-        self._export_settings = ExportSettings(
-            format="MP3", sample_rate="44100 Hz", bit_depth="24-bit"
-        )
+        self._export_settings = ExportSettings()
         self._output_dir: str = str(Path.home() / "PanhaExports")
+        self._export_settings.output_dir = self._output_dir
         self._worker: BatchWorker | None = None
         self._thread: QThread | None = None
         self._templates = TemplateStore()
@@ -563,6 +562,7 @@ class MainWindow(QMainWindow):
         )
         if folder:
             self._output_dir = folder
+            self._export_settings.output_dir = folder
 
     def _on_open_output(self) -> None:
         out = Path(self._output_dir)
@@ -593,11 +593,18 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
         sources = [row.path for row in self._rows]
-        items = build_items(sources, self._output_dir, self._info_state)
+        items = build_items(
+            sources,
+            self._output_dir,
+            self._info_state,
+            export=self._export_settings,
+        )
         for idx in range(len(self._rows)):
             self._update_row_status(idx, "Pending")
         self.progress.setValue(0)
-        worker, thread = start_worker(items)
+        worker, thread = start_worker(
+            items, max_threads=self._export_settings.max_threads
+        )
         worker.progress.connect(self._on_progress)
         worker.item_done.connect(self._on_item_done)
         worker.item_failed.connect(self._on_item_failed)
