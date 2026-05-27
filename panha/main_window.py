@@ -57,10 +57,10 @@ from .dialogs import (
 )
 from .dialogs.file_info_dialog import FileInformationState
 from .mastering import MasteringSettings
-from .metadata import format_duration, probe_duration_seconds
+from .metadata import format_duration
 from .templates import TemplateStore
 from .widgets import MasteringPanel, SystemStatsWidget, TransportBar, WaveformView
-from .widgets.worker import BatchWorker, build_items, start_worker
+from .widgets.worker import BatchWorker, build_items, schedule_probe, start_worker
 
 SUPPORTED_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
 _NEW_TEMPLATE_PLACEHOLDER = "Default"
@@ -330,7 +330,7 @@ class MainWindow(QMainWindow):
 
     def _add_paths(self, paths: list[str]) -> None:
         existing = {row.path for row in self._rows}
-        added = 0
+        added: list[str] = []
         for raw in paths:
             path = os.path.abspath(raw)
             if path in existing:
@@ -340,14 +340,26 @@ class MainWindow(QMainWindow):
             ext = os.path.splitext(path)[1].lower()
             if ext not in SUPPORTED_EXTS:
                 continue
-            duration = probe_duration_seconds(path)
-            self._rows.append(QueueRow(path=path, duration_seconds=duration))
+            # Probing duration is a synchronous ffprobe call; defer it to
+            # the global thread pool so adding a folder of hundreds of
+            # files doesn't freeze the UI.
+            self._rows.append(QueueRow(path=path, duration_seconds=0.0))
             existing.add(path)
-            added += 1
+            added.append(path)
         if added:
             self._refresh_table()
             if self.table.currentRow() < 0 and self._rows:
                 self.table.setCurrentCell(0, 0)
+            for path in added:
+                schedule_probe(path, self._on_probe_finished)
+
+    def _on_probe_finished(self, path: str, duration: float) -> None:
+        for idx, row in enumerate(self._rows):
+            if row.path == path:
+                row.duration_seconds = duration
+                item = QTableWidgetItem(format_duration(duration))
+                self.table.setItem(idx, 1, item)
+                break
 
     # -- template combo -------------------------------------------------
 

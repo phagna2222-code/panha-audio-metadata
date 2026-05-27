@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
 from ..dialogs.file_info_dialog import FileInformationState
 from ..mastering import MasteringSettings
-from ..metadata import FfmpegNotFoundError, Metadata, MetadataWriteError, write_metadata
+from ..metadata import (
+    FfmpegNotFoundError,
+    Metadata,
+    MetadataWriteError,
+    probe_duration_seconds,
+    write_metadata,
+)
 
 
 @dataclasses.dataclass
@@ -89,6 +96,53 @@ def build_items(
             mastering=mastering,
         ))
     return items
+
+
+class _ProbeSignals(QObject):
+    """Signal carrier for :class:`ProbeTask` (QRunnable can't emit directly)."""
+
+    finished = pyqtSignal(str, float)  # path, duration_seconds
+
+
+class ProbeTask(QRunnable):
+    """Probe a single file's duration on the global thread pool.
+
+    Use :attr:`signals.finished` to receive the result back on the
+    Qt thread that connected the slot.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        probe_fn: Callable[[str], float] = probe_duration_seconds,
+    ) -> None:
+        super().__init__()
+        self._path = path
+        self._probe_fn = probe_fn
+        self.signals = _ProbeSignals()
+        self.setAutoDelete(True)
+
+    def run(self) -> None:  # pragma: no cover - exercised via signals
+        try:
+            duration = float(self._probe_fn(self._path))
+        except Exception:
+            duration = 0.0
+        self.signals.finished.emit(self._path, duration)
+
+
+def schedule_probe(
+    path: str,
+    on_finished: Callable[[str, float], None],
+    *,
+    pool: QThreadPool | None = None,
+    probe_fn: Callable[[str], float] = probe_duration_seconds,
+) -> ProbeTask:
+    """Submit ``path`` to a background pool; ``on_finished`` runs on the caller's thread."""
+    task = ProbeTask(path, probe_fn=probe_fn)
+    task.signals.finished.connect(on_finished)
+    (pool or QThreadPool.globalInstance()).start(task)
+    return task
 
 
 def start_worker(items: list[BatchItem]) -> tuple[BatchWorker, QThread]:
