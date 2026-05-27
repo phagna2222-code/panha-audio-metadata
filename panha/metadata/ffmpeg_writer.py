@@ -183,6 +183,10 @@ def write_metadata(
     cancel_check: Callable[[], bool] | None = None,
     poll_interval: float = 0.1,
     terminate_grace: float = 2.0,
+    sample_rate_hz: int | None = None,
+    lufs_target_lufs: float | None = None,
+    codec_args_override: list[str] | None = None,
+    force_re_encode: bool = False,
 ) -> str:
     """Write ``meta`` to ``src`` and save the result at ``dst``.
 
@@ -190,10 +194,16 @@ def write_metadata(
     through a temporary file and atomically replaces ``dst`` only on
     success.
 
-    Audio is stream-copied (``-c:a copy``) when ``mastering`` is ``None``
-    or inactive, so tagging stays zero-loss. When the mastering chain is
-    active the audio stream is re-encoded with the appropriate codec for
-    the destination suffix and the filter chain is applied via ``-af``.
+    Audio is stream-copied (``-c:a copy``) when no mastering chain,
+    LUFS target, codec override, sample-rate change or explicit
+    ``force_re_encode`` is requested -- so tagging stays zero-loss for
+    the common case. Re-encoding kicks in automatically when:
+
+    * a non-bypassed :class:`MasteringSettings` is supplied, or
+    * ``lufs_target_lufs`` is set (prepended as ``loudnorm=I=<n>:...``), or
+    * ``codec_args_override`` is given (e.g. WAV bit-depth selection), or
+    * ``sample_rate_hz`` is set (added as ``-ar <hz>``), or
+    * ``force_re_encode=True``.
 
     Returns the absolute path to the written file.
     """
@@ -208,8 +218,29 @@ def write_metadata(
 
     cover_file = resolve_cover_path(meta.cover_path) if meta.cover_path else ""
     has_cover = bool(cover_file)
-    filter_chain = mastering.to_filter_chain() if mastering is not None else ""
-    re_encode = bool(filter_chain)
+
+    filter_parts: list[str] = []
+    if lufs_target_lufs is not None:
+        # ffmpeg loudnorm: integration target, true-peak ceiling, LRA.
+        # The TP/LRA values mirror EBU R128 'broadcast' defaults and
+        # are the same regardless of the chosen target LUFS so users
+        # can A/B different targets without surprising re-clipping.
+        filter_parts.append(
+            f"loudnorm=I={lufs_target_lufs}:TP=-1.5:LRA=11"
+        )
+    mastering_chain = (
+        mastering.to_filter_chain() if mastering is not None else ""
+    )
+    if mastering_chain:
+        filter_parts.append(mastering_chain)
+    filter_chain = ",".join(filter_parts)
+
+    re_encode = (
+        bool(filter_chain)
+        or force_re_encode
+        or codec_args_override is not None
+        or sample_rate_hz is not None
+    )
 
     cmd: list[str] = [
         ffmpeg_bin,
@@ -228,8 +259,14 @@ def write_metadata(
         cmd.extend(["-map", "0:a"])
 
     if re_encode:
-        cmd.extend(codec_args_for(dst_path.suffix))
-        cmd.extend(["-af", filter_chain])
+        if codec_args_override is not None:
+            cmd.extend(codec_args_override)
+        else:
+            cmd.extend(codec_args_for(dst_path.suffix))
+        if sample_rate_hz is not None:
+            cmd.extend(["-ar", str(int(sample_rate_hz))])
+        if filter_chain:
+            cmd.extend(["-af", filter_chain])
     else:
         cmd.extend(["-c:a", "copy"])
 

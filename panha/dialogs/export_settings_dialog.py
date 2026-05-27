@@ -18,16 +18,38 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-FORMATS = ["MP3", "WAV", "FLAC", "M4A", "OGG"]
-SAMPLE_RATES = ["22050 Hz", "44100 Hz", "48000 Hz", "96000 Hz"]
+PRESERVE_SOURCE_FORMAT = "Same as source"
+FORMATS = [PRESERVE_SOURCE_FORMAT, "MP3", "WAV", "FLAC", "M4A", "OGG"]
+PRESERVE_SOURCE_SAMPLE_RATE = "Same as source"
+SAMPLE_RATES = [
+    PRESERVE_SOURCE_SAMPLE_RATE,
+    "22050 Hz",
+    "44100 Hz",
+    "48000 Hz",
+    "96000 Hz",
+]
 BIT_DEPTHS = ["16-bit", "24-bit", "32-bit"]
 LUFS_TARGETS = ["Off", "-23 LUFS", "-16 LUFS", "-14 LUFS", "-9 LUFS"]
+
+_FORMAT_SUFFIXES = {
+    "MP3": ".mp3",
+    "WAV": ".wav",
+    "FLAC": ".flac",
+    "M4A": ".m4a",
+    "OGG": ".ogg",
+}
+
+_WAV_BIT_DEPTH_CODECS = {
+    "16-bit": ["-c:a", "pcm_s16le"],
+    "24-bit": ["-c:a", "pcm_s24le"],
+    "32-bit": ["-c:a", "pcm_s32le"],
+}
 
 
 @dataclasses.dataclass
 class ExportSettings:
-    format: str = "MP3"
-    sample_rate: str = "44100 Hz"
+    format: str = PRESERVE_SOURCE_FORMAT
+    sample_rate: str = PRESERVE_SOURCE_SAMPLE_RATE
     bit_depth: str = "24-bit"
     max_threads: int = 4
     suno_bypass: bool = False
@@ -35,6 +57,45 @@ class ExportSettings:
     soft_clip: bool = False
     lufs_target: str = "Off"
     output_dir: str = ""
+
+    # -- Parsing helpers consumed by build_items / write_metadata. --
+    # Keeping them on the dataclass means the UI strings stay in one
+    # place and tests can exercise the same translation the writer uses.
+
+    def output_suffix_for(self, source_suffix: str) -> str:
+        """Suffix to use for the output file, preserving source when asked."""
+        if self.format == PRESERVE_SOURCE_FORMAT:
+            return source_suffix or ".mp3"
+        return _FORMAT_SUFFIXES.get(self.format.upper(), source_suffix or ".mp3")
+
+    def parsed_sample_rate_hz(self) -> int | None:
+        """Integer Hz value, or None to leave the source rate untouched."""
+        if self.sample_rate == PRESERVE_SOURCE_SAMPLE_RATE:
+            return None
+        try:
+            return int(self.sample_rate.split()[0])
+        except (ValueError, IndexError):
+            return None
+
+    def parsed_lufs_target(self) -> float | None:
+        """LUFS integration target for ``loudnorm``; None when 'Off'."""
+        if not self.lufs_target or self.lufs_target == "Off":
+            return None
+        try:
+            return float(self.lufs_target.split()[0])
+        except (ValueError, IndexError):
+            return None
+
+    def codec_args_override(self) -> list[str] | None:
+        """Explicit ``-c:a ...`` args for the chosen format.
+
+        Only WAV has a user-selectable codec (the bit depth); for every
+        other format we let :func:`panha.mastering.codec_args_for` pick
+        the default codec from the output suffix.
+        """
+        if self.format.upper() == "WAV":
+            return list(_WAV_BIT_DEPTH_CODECS.get(self.bit_depth, ["-c:a", "pcm_s24le"]))
+        return None
 
 
 class ExportSettingsDialog(QDialog):
