@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("PyQt6")
+from PyQt6.QtCore import QThreadPool  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from panha.metadata import FfmpegNotFoundError, Metadata  # noqa: E402
-from panha.widgets.worker import BatchItem, BatchWorker  # noqa: E402
+from panha.widgets.worker import BatchItem, BatchWorker, schedule_probe  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -79,3 +80,45 @@ def test_worker_cancels_remaining_items(qapp, tmp_path: Path):
     # Progress must still tick to total for cancelled items so the bar
     # doesn't get stuck partway.
     assert progress == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_schedule_probe_runs_off_thread_and_emits_result(qapp, tmp_path: Path):
+    """schedule_probe must defer the probe to a worker and report back
+    via signal so the UI thread doesn't block on ffprobe."""
+    pool = QThreadPool()
+    pool.setMaxThreadCount(2)
+
+    received: list[tuple[str, float]] = []
+
+    def fake_probe(path: str) -> float:
+        return 1.5 if path.endswith("a.mp3") else 2.25
+
+    a = str(tmp_path / "a.mp3")
+    b = str(tmp_path / "b.mp3")
+    schedule_probe(a, lambda p, d: received.append((p, d)), pool=pool, probe_fn=fake_probe)
+    schedule_probe(b, lambda p, d: received.append((p, d)), pool=pool, probe_fn=fake_probe)
+
+    # Wait for both tasks to finish, draining the Qt event queue so
+    # queued signal connections deliver.
+    pool.waitForDone(5000)
+    qapp.processEvents()
+
+    assert sorted(received) == [(a, 1.5), (b, 2.25)]
+
+
+def test_schedule_probe_reports_zero_when_probe_raises(qapp, tmp_path: Path):
+    """A probe failure must surface as duration=0.0, never propagate."""
+    pool = QThreadPool()
+    pool.setMaxThreadCount(1)
+
+    received: list[tuple[str, float]] = []
+
+    def boom(_path: str) -> float:
+        raise RuntimeError("ffprobe explosion")
+
+    path = str(tmp_path / "x.mp3")
+    schedule_probe(path, lambda p, d: received.append((p, d)), pool=pool, probe_fn=boom)
+    pool.waitForDone(5000)
+    qapp.processEvents()
+
+    assert received == [(path, 0.0)]
